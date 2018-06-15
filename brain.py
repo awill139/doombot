@@ -43,3 +43,42 @@ class SoftmaxBody(nn.Module):
         probs = F.softmax(outputs * self.T)
         actions = probs.multinomial()
         return actions
+
+class Brain:
+    def __init__(self, brain, body):
+        self.brain = brain
+        self.body = body
+
+    def __call__(self, inputs):
+        input = Variable(torch.from_numpy(np.array(inputs, dtype = np.float32)))
+        output = self.brain(input)
+        actions = self.body(output)
+        return actions.data.numpy()
+
+doom_env = image_preprocess.PreprocessImage(SkipWrapper(4)(ToDiscrete("minimal")(gym.make("ppaquette/DoomCorridor-v0"))), width = 80, height = 80, grayscale = True)
+doom_env = gym.wrappers.Monitor(doom_env, "videos", force = True)
+num_actions = doom_env.action_space.n
+
+cnn = CNN(num_actions)
+softmax_body = SoftmaxBody(temp = 1.0)
+brain = Brain(brain = cnn, body = softmax_body)
+
+n_steps = exp_replay.NStepProg(doom_env, brain, 10)
+memory = exp_replay.ReplayMem(n_steps = n_steps)
+
+def elig_trace(batch):
+    gamma = 0.99
+    inputs = []
+    targets = []
+    for series in batch:
+        input = Variable(torch.from_numpy(np.array([series[0].state, series[-1].state], dtype = np.float32)))
+        output = cnn(input)
+        cum_reward = 0.0 if series[-1].done else output[1].data.max
+        for step in reversed(series[:-1]):
+            cum_reward = cum_reward * gamma + step.reward
+        state = series[0].state
+        target = output[0].data
+        target[series[0].action] = cum_reward
+        inputs.append(state)
+        targets.append(target)
+    return torch.from_numpy(np.array(inputs, dtype = np.float32)), torch.stack(targets)
